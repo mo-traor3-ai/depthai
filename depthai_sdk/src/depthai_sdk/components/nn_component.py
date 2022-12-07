@@ -35,6 +35,7 @@ class NNComponent(Component):
     _stream_input: dai.Node.Output  # Node Output that will be used as the input for this NNComponent
 
     _blob: dai.OpenVINO.Blob = None
+    _blobPath: Union[str, Path] = None
     _forcedVersion: Optional[dai.OpenVINO.Version] = None  # Forced OpenVINO version
     _size: Tuple[int, int]  # Input size to the NN
     _args: Dict = None
@@ -50,6 +51,8 @@ class NNComponent(Component):
     # For visualizer
     _labels: List = None  # obj detector labels
     _handler: Callable = None  # Custom model handler for decoding
+
+    _rvc_version: int = 2
 
     def __init__(self,
                  pipeline: dai.Pipeline,
@@ -106,11 +109,17 @@ class NNComponent(Component):
 
     def _update_device_info(self, pipeline: dai.Pipeline, device: dai.Device, version: dai.OpenVINO.Version):
 
-        if self._blob is None:
+        if self._blob is None and self._rvc_version == 2:
             self._blob = dai.OpenVINO.Blob(self._blobFromConfig(self._config['model'], version))
 
         # TODO: update NN input based on camera resolution
-        self.node.setBlob(self._blob)
+        if self._rvc_version == 2:
+            self.node.setBlob(self._blob)
+        # TODO: Check if rvc_version of the model and the device match, otherwise throw
+        elif self._rvc_version == 3:
+            self.node.setBlob(self._blobPath)
+        else:
+            raise ValueError("Invalid rvc_version set. Only rvc_version=2 and rvc_version=3 are supported at the moment")
         self._out = self.node.out
 
         if self._config:
@@ -122,12 +131,27 @@ class NNComponent(Component):
             if self._isYolo() and meta:
                 self.config_yolo_from_metadata(metadata=meta)
 
-        if 1 < len(self._blob.networkInputs):
-            raise NotImplementedError()
+        if self._rvc_version == 2:
+            if 1 < len(self._blob.networkInputs):
+                raise NotImplementedError()
 
-        nnIn: dai.TensorInfo = next(iter(self._blob.networkInputs.values()))
-        # TODO: support models that expect mono img
-        self._size: Tuple[int, int] = (nnIn.dims[0], nnIn.dims[1])
+            nnIn: dai.TensorInfo = next(iter(self._blob.networkInputs.values()))
+            # TODO: support models that expect mono img
+            self._size: Tuple[int, int] = (nnIn.dims[0], nnIn.dims[1])
+        elif self._rvc_version == 3:
+            # Information can't be parsed from the blob on RVC3, so relay on JSON config having the data
+            if not self._config:
+                raise ValueError("RVC3 only supported when a config is loaded")
+            input_size = self._config.get("nn_config", {}).get("input_size", "")
+            if len(input_size) == 0:
+                raise ValueError("RVC3 needs to get input_size from JSON")
+            try:
+                sizes = [int(dim) for dim in input_size.split("x")]
+                if len(sizes) != 2:
+                    raise ValueError(f"Couldn't parse input dimensions for the model: {input_size}")
+                self._size: Tuple[int, int] = tuple(sizes)
+            except Exception as ex:
+                raise RuntimeError(f"Failed parsing input dimensions from input: {ex}")
         # maxSize = dims
 
         if isinstance(self._input, CameraComponent):
@@ -230,6 +254,9 @@ class NNComponent(Component):
         else:  # Dict
             self._config = modelConfig
 
+        if 'rvc_version' in self._config:
+            self._rvc_version = self._config['rvc_version']
+
         # Get blob from the config file
         if 'model' in self._config:
             model = self._config['model']
@@ -241,7 +268,10 @@ class NNComponent(Component):
                         model[name] = str((parentFolder / model[name]).resolve())
 
             if 'blob' in model:
-                self._blob = dai.OpenVINO.Blob(model['blob'])
+                if self._rvc_version == 2:
+                    self._blob = dai.OpenVINO.Blob(model['blob'])
+                elif self._rvc_version == 3:
+                    self._blobPath = model['blob'] # No way to parse RVC3 blob on the host right now, pass to depthai as a path
 
         # Parse OpenVINO version
         if "openvino_version" in self._config:

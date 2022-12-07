@@ -35,3 +35,5 @@ class Config(Schema):
     openvino_version = fields.Str(required=False)  # If the model requires specific OpenVINO version
     mappings = fields.Nested(Mappings, required=False)
     version = fields.Int()  # Version of the config file
+    # Specify version
+    rvc_version = fields.Int(required=False)
