@@ -38,7 +38,7 @@ class NNComponent(Component):
 
     _blob: dai.OpenVINO.Blob = None
     _blobPath: Union[str, Path] = None
-    _forcedVersion: Optional[dai.OpenVINO.Version] = None  # Forced OpenVINO version
+    _forced_version: Optional[dai.OpenVINO.Version] = None  # Forced OpenVINO version
     _size: Tuple[int, int]  # Input size to the NN
     _args: Dict = None
     _config: Dict = None
@@ -125,7 +125,7 @@ class NNComponent(Component):
     def _update_device_info(self, pipeline: dai.Pipeline, device: dai.Device, version: dai.OpenVINO.Version):
 
         if self._blob is None and self._rvc_version == 2:
-            self._blob = dai.OpenVINO.Blob(self._blobFromConfig(self._config['model'], version))
+            self._blob = dai.OpenVINO.Blob(self._blob_from_config(self._config['model'], version))
         if self._roboflow:
             path = self._roboflow.device_update(device)
             self._parse_config(path)
@@ -142,11 +142,11 @@ class NNComponent(Component):
 
         if self._config:
             nnConfig = self._config.get("nn_config", {})
-            if self._isDetector() and 'confidence_threshold' in nnConfig:
+            if self._is_detector() and 'confidence_threshold' in nnConfig:
                 self.node.setConfidenceThreshold(float(nnConfig['confidence_threshold']))
 
             meta = nnConfig.get('NN_specific_metadata', None)
-            if self._isYolo() and meta:
+            if self._is_yolo() and meta:
                 self.config_yolo_from_metadata(metadata=meta)
 
         if self._rvc_version == 2:
