@@ -1,3 +1,4 @@
+import copy
 import time
 import warnings
 from pathlib import Path
@@ -286,6 +287,11 @@ class OakCamera:
                 self.poll()
 
     def running(self) -> bool:
+        """
+        Check if camera is running.
+        Returns:
+            True if camera is running, False otherwise.
+        """
         return not self._stop
 
     def poll(self):
@@ -374,10 +380,10 @@ class OakCamera:
             callback: Where to send synced streams
             visualize: Whether to draw on the frames (like with visualize())
         """
-        visualizer = Visualizer() if visualize else None
         if isinstance(outputs, Callable):
             outputs = [outputs]  # to list
-        self._out_templates.append(SyncConfig(outputs, callback, visualizer))
+
+        self._out_templates.append(SyncConfig(outputs, callback))
 
     def record(self,
                outputs: Union[Callable, List[Callable]],
@@ -432,9 +438,7 @@ class OakCamera:
             raise ValueError('Recording visualizer is only supported for a single output.')
 
         visualizer = Visualizer(scale, fps)
-        self._callback(output, callback, visualizer, record_path)
-
-        return visualizer
+        return self._callback(output, callback, visualizer, record_path)
 
     def _callback(self,
                   output: Union[List, Callable, Component],
@@ -449,7 +453,9 @@ class OakCamera:
         if isinstance(output, Component):
             output = output.out.main
 
+        visualizer = copy.deepcopy(visualizer) or Visualizer()
         self._out_templates.append(OutputConfig(output, callback, visualizer, record_path))
+        return visualizer
 
     def callback(self, output: Union[List, Callable, Component], callback: Callable):
         """

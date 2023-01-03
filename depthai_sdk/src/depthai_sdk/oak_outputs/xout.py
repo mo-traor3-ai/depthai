@@ -6,7 +6,6 @@ import depthai as dai
 import numpy as np
 from distinctipy import distinctipy
 
-from depthai_sdk.callback_context import CallbackContext
 from depthai_sdk.classes.nn_results import Detections, ImgLandmarks
 from depthai_sdk.classes.packets import (
     FramePacket,
@@ -44,13 +43,15 @@ class XoutFrames(XoutBase):
     frames: StreamXout
     _video_recorder: VideoRecorder
 
-    def __init__(self, frames: StreamXout, fps: float = 30):
+    def __init__(self, frames: StreamXout, fps: float = 30, frame_shape: Tuple[int, ...] = None):
         self.frames = frames
         self.name = frames.name
 
         self.fps = fps
         self._video_recorder = None
         self._is_recorder_enabled = None
+        self._frame_shape = frame_shape
+
         super().__init__()
 
     def setup_visualize(self,
@@ -61,7 +62,7 @@ class XoutFrames(XoutBase):
 
     def setup_recorder(self,
                        recorder: VideoRecorder,
-                       encoding: str = 'avc1'):
+                       encoding: str = 'mp4v'):
         self._video_recorder = recorder
         # Enable encoding for the video recorder
         self._video_recorder[self.name].set_fourcc(encoding)
@@ -71,8 +72,9 @@ class XoutFrames(XoutBase):
         Called from main thread if visualizer is not None.
         """
 
-        if self._visualizer.frame_shape is None:
-            self._visualizer.frame_shape = packet.frame.shape
+        # Frame shape may be 1D, that means it's an encoded frame
+        if self._visualizer.frame_shape is None or np.array(self._visualizer.frame_shape).ndim == 1:
+            self._visualizer.frame_shape = self._frame_shape or packet.frame.shape
 
         if self._visualizer.config.output.show_fps:
             self._visualizer.add_text(
@@ -81,8 +83,7 @@ class XoutFrames(XoutBase):
             )
 
         if self.callback:  # Don't display frame, call the callback
-            ctx = CallbackContext(packet, self._visualizer, self._video_recorder)
-            self.callback(ctx)
+            self.callback(packet, self._visualizer)
         else:
             packet.frame = self._visualizer.draw(packet.frame)
             # Draw on the frame
@@ -125,12 +126,14 @@ class XoutMjpeg(XoutFrames):
     lossless: bool
     fps: float
 
-    def __init__(self, frames: StreamXout, color: bool, lossless: bool, fps: float):
+    def __init__(self, frames: StreamXout, color: bool, lossless: bool, fps: float, frame_shape: Tuple[int, ...]):
         super().__init__(frames)
         # We could use cv2.IMREAD_UNCHANGED, but it produces 3 planes (RGB) for mono frame instead of a single plane
         self.flag = cv2.IMREAD_COLOR if color else cv2.IMREAD_GRAYSCALE
         self.lossless = lossless
         self.fps = fps
+        self._frame_shape = frame_shape
+
         if lossless and self._visualizer:
             raise ValueError('Visualizing Lossless MJPEG stream is not supported!')
 
@@ -146,12 +149,19 @@ class XoutH26x(XoutFrames):
     fps: float
     profile: dai.VideoEncoderProperties.Profile
 
-    def __init__(self, frames: StreamXout, color: bool, profile: dai.VideoEncoderProperties.Profile, fps: float):
+    def __init__(self,
+                 frames: StreamXout,
+                 color: bool,
+                 profile: dai.VideoEncoderProperties.Profile,
+                 fps: float,
+                 frame_shape: Tuple[int, ...]):
         super().__init__(frames)
         self.color = color
         self.profile = profile
         self.fps = fps
+        self._frame_shape = frame_shape
         fourcc = 'hevc' if profile == dai.VideoEncoderProperties.Profile.H265_MAIN else 'h264'
+
         import av
         self.codec = av.CodecContext.create(fourcc, "r")
 
@@ -353,8 +363,8 @@ class XoutDepth(XoutFrames, XoutClickable):
         depth_frame_color = cv2.normalize(depth_frame, None, 256, 0, cv2.NORM_INF, cv2.CV_8UC3)
         depth_frame_color = cv2.equalizeHist(depth_frame_color)
 
-        colorize = stereo_config.colorize or self.colorize
-        colormap = stereo_config.colormap or self.colormap
+        colorize = self.colorize or stereo_config.colorize
+        colormap = self.colormap or stereo_config.colormap
         if colorize == StereoColor.GRAY:
             packet.frame = depth_frame_color
         elif colorize == StereoColor.RGB:
@@ -484,22 +494,25 @@ class XoutNnResults(XoutSeqSync, XoutFrames):
                 self.labels.append((text, color))
 
         self.normalizer = NormalizeBoundingBox(det_nn._size, det_nn._ar_resize_mode)
-
         try:
-            self.frame_size = self.det_nn._input.node.getPreviewSize()
+            self.frame_shape = self.det_nn._input.node.getPreviewSize()
         except AttributeError:
-            self.frame_size = self.det_nn._input.stream_size  # Replay
+            self.frame_shape = self.det_nn._input.stream_size  # Replay
 
-        self.frame_size = np.array(self.frame_size)[::-1]
-        self.mock_frame = np.zeros(self.frame_size, dtype=np.uint8)
+        self.frame_shape = np.array(self.frame_shape)[::-1]
 
     def setup_visualize(self,
                         visualizer: Visualizer,
                         name: str = None):
         super().setup_visualize(visualizer, name)
-        self._visualizer.frame_shape = self.frame_size
 
     def on_callback(self, packet: Union[DetectionPacket, TrackerPacket]):
+        if self._visualizer.frame_shape is None:
+            if packet.frame.ndim == 1:
+                self._visualizer.frame_shape = self.frame_shape
+            else:
+                self._visualizer.frame_shape = packet.frame.shape
+
         # Add detections to packet
         if isinstance(packet.img_detections, dai.ImgDetections) \
                 or isinstance(packet.img_detections, dai.SpatialImgDetections) \
@@ -510,7 +523,7 @@ class XoutNnResults(XoutSeqSync, XoutFrames):
                 d.label = self.labels[detection.label][0] if self.labels else str(detection.label)
                 d.color = self.labels[detection.label][1] if self.labels else (255, 255, 255)
                 bbox = self.normalizer.normalize(
-                    frame=self.mock_frame,
+                    frame=np.zeros(self._visualizer.frame_shape, dtype=bool),
                     bbox=(detection.xmin, detection.ymin, detection.xmax, detection.ymax)
                 )
                 d.top_left = (int(bbox[0]), int(bbox[1]))
@@ -529,10 +542,8 @@ class XoutNnResults(XoutSeqSync, XoutFrames):
             colors = packet.img_detections.colors
             for landmarks in all_landmarks:
                 for i, landmark in enumerate(landmarks):
-                    l = self.normalizer.normalize(frame=self.mock_frame, bbox=landmark)
+                    l = self.normalizer.normalize(frame=np.zeros(packet.frame.shape, dtype=bool), bbox=landmark)
                     self._visualizer.add_line(pt1=tuple(l[0]), pt2=tuple(l[1]), color=colors[i])
-
-        super().visualize(packet)
 
     def package(self, msgs: Dict):
         if self.queue.full():
@@ -616,6 +627,12 @@ class XoutTracker(XoutNnResults):
                 spatial_points = None
         except IndexError:
             spatial_points = None
+
+        if self._visualizer.frame_shape is None:
+            if packet.frame.ndim == 1:
+                self._visualizer.frame_shape = self.frame_shape
+            else:
+                self._visualizer.frame_shape = packet.frame.shape
 
         blacklist = set()
         threshold = self._visualizer.config.tracking.deletion_lost_threshold
@@ -761,13 +778,15 @@ class XoutTwoStage(XoutNnResults):
             self.msgs[seq][self.nn_results.name] = None
 
         if name == self.second_nn_out.name:
-            if (f := self.second_nn._decode_fn) is not None:
+            f = self.second_nn._decode_fn
+            if f is not None:
                 self.msgs[seq][name].append(f(msg))
             else:
                 self.msgs[seq][name].append(msg)
 
         elif name == self.nn_results.name:
-            if (f := self.det_nn._decode_fn) is not None:
+            f = self.det_nn._decode_fn
+            if f is not None:
                 msg = f(msg)
 
             self.add_detections(seq, msg)
@@ -791,7 +810,8 @@ class XoutTwoStage(XoutNnResults):
                         rect = det[0], det[1], det[2], det[3]
 
                     try:
-                        if (angle := msg.angles[i]) != 0.0:
+                        angle = msg.angles[i]
+                        if angle != 0.0:
                             rr = dai.RotatedRect()
                             rr.center.x = rect[0]
                             rr.center.y = rect[1]

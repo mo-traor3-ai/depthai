@@ -2,7 +2,7 @@ from typing import Tuple
 
 import numpy as np
 
-from depthai_sdk.components.nn_helper import AspectRatioResizeMode
+from depthai_sdk.components.nn_helper import ResizeMode
 
 
 class NormalizeBoundingBox:
@@ -11,18 +11,13 @@ class NormalizeBoundingBox:
     resize mode and map coordinates to correct location.
     """
 
-    def __init__(self,
-                 aspectRatio: Tuple[float, float],
-                 arResizeMode: AspectRatioResizeMode,
-                 ):
+    def __init__(self, aspect_ratio: Tuple[float, float], resize_mode: ResizeMode):
         """
-        @param aspectRatio: NN input size
-        @param arResizeMode
+        :param aspect_ratio: NN input size
+        :param ar_resize_mode: Aspect ratio resize mode
         """
-        self.aspectRatio = aspectRatio
-        self.arResizeMode = arResizeMode
-
-        pass
+        self.aspect_ratio = aspect_ratio
+        self.resize_mode = resize_mode
 
     def normalize(self, frame, bbox: Tuple[float, float, float, float]) -> np.ndarray:
         """
@@ -38,8 +33,8 @@ class NormalizeBoundingBox:
         bbox = np.array(bbox)
 
         # Edit the bounding boxes before normalizing them
-        if self.arResizeMode == AspectRatioResizeMode.CROP:
-            ar_diff = (self.aspectRatio[0] / self.aspectRatio[1]) / (frame.shape[1] / frame.shape[0])
+        if self.resize_mode == ResizeMode.CROP:
+            ar_diff = (self.aspect_ratio[0] / self.aspect_ratio[1]) / (frame.shape[1] / frame.shape[0])
             if ar_diff < 1:
                 new_w = frame.shape[1] * ar_diff
                 new_h = frame.shape[0]
@@ -56,17 +51,17 @@ class NormalizeBoundingBox:
                 bbox[3] = bbox[3] * new_h + (new_h - frame.shape[0]) / 2
 
             return bbox.astype(int)
-        elif self.arResizeMode == AspectRatioResizeMode.STRETCH:
+        elif self.resize_mode == ResizeMode.STRETCH:
             # No need to edit bounding boxes when stretching
             pass
-        elif self.arResizeMode == AspectRatioResizeMode.LETTERBOX:
+        elif self.resize_mode == ResizeMode.LETTERBOX:
             # There might be better way of doing this. TODO: test if it works as expected
-            ar_diff = self.aspectRatio[0] / self.aspectRatio[1] - frame.shape[1] / frame.shape[0]
+            ar_diff = self.aspect_ratio[0] / self.aspect_ratio[1] - frame.shape[1] / frame.shape[0]
             sel = 0 if 0 < ar_diff else 1
             nsel = 0 if sel == 1 else 1
             # Get the divisor
-            div = frame.shape[sel] / self.aspectRatio[nsel]
-            letterboxing_ratio = 1 - (frame.shape[nsel] / div) / self.aspectRatio[sel]
+            div = frame.shape[sel] / self.aspect_ratio[nsel]
+            letterboxing_ratio = 1 - (frame.shape[nsel] / div) / self.aspect_ratio[sel]
 
             bbox[sel::2] -= abs(letterboxing_ratio) / 2
             bbox[sel::2] /= 1 - abs(letterboxing_ratio)
