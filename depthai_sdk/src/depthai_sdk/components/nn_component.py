@@ -37,7 +37,7 @@ class NNComponent(Component):
     _stream_input: dai.Node.Output  # Node Output that will be used as the input for this NNComponent
 
     _blob: dai.OpenVINO.Blob = None
-    _blobPath: Union[str, Path] = None
+    _blob_path_rvc3: Union[str, Path] = None
     _forced_version: Optional[dai.OpenVINO.Version] = None  # Forced OpenVINO version
     _size: Tuple[int, int]  # Input size to the NN
     _args: Dict = None
@@ -124,6 +124,18 @@ class NNComponent(Component):
 
     def _update_device_info(self, pipeline: dai.Pipeline, device: dai.Device, version: dai.OpenVINO.Version):
 
+        # First check if the device is RVC2 or RVC3
+        device_info = device.getDeviceInfo()
+        if not hasattr(dai, "X_LINK_RVC3"):
+            # Assume RVC2 in this case
+            self._rvc_version = 2
+        elif device_info.platform == dai.X_LINK_MYRIAD_X:
+            self._rvc_version = 2
+        elif device_info.platform == dai.X_LINK_RVC3:
+            self._rvc_version = 3
+        else:
+            raise ValueError("Could not get the rvc version from the device.")
+
         if self._blob is None and self._rvc_version == 2:
             self._blob = dai.OpenVINO.Blob(self._blob_from_config(self._config['model'], version))
         if self._roboflow:
@@ -135,7 +147,9 @@ class NNComponent(Component):
             self.node.setBlob(self._blob)
         # TODO: Check if rvc_version of the model and the device match, otherwise throw
         elif self._rvc_version == 3:
-            self.node.setBlob(self._blobPath)
+            if self._blob_path_rvc3 is None:
+                raise ValueError("Device was determined to be RVC3, but no RVC3 blob provided.")
+            self.node.setBlob(self._blob_path_rvc3)
         else:
             raise ValueError("Invalid rvc_version set. Only rvc_version=2 and rvc_version=3 are supported at the moment")
         self._out = self.node.out
@@ -317,9 +331,6 @@ class NNComponent(Component):
             else:
                 raise ValueError(f"[NN Dict configuration] Source '{self._config['source']}' not supported")
 
-        if 'rvc_version' in self._config:
-            self._rvc_version = self._config['rvc_version']
-
         # Get blob from the config file
         if 'model' in self._config:
             model = self._config['model']
@@ -331,10 +342,11 @@ class NNComponent(Component):
                         model[name] = str((parent_folder / model[name]).resolve())
 
             if 'blob' in model:
-                if self._rvc_version == 2:
-                    self._blob = dai.OpenVINO.Blob(model['blob'])
-                elif self._rvc_version == 3:
-                    self._blobPath = model['blob'] # No way to parse RVC3 blob on the host right now, pass to depthai as a path
+                self._blob = dai.OpenVINO.Blob(model['blob'])
+
+        if 'model_rvc3' in self._config:
+            model = self._config['model_rvc3']
+            self._blob_path_rvc3 = model['blob'] # No way to parse RVC3 blob on the host right now, leave it as a path
 
         # Parse OpenVINO version
         if "openvino_version" in self._config:
