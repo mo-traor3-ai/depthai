@@ -137,6 +137,8 @@ class NNComponent(Component):
             raise ValueError("Could not get the rvc version from the device.")
 
         if self._blob is None and self._rvc_version == 2:
+            if 'model' not in self._config:
+                raise RuntimeError("No model specified in the config")
             self._blob = dai.OpenVINO.Blob(self._blob_from_config(self._config['model'], version))
         if self._roboflow:
             path = self._roboflow.device_update(device)
