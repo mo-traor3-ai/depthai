@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from collections import defaultdict
 from typing import Dict, List, Any, Optional, Tuple, Union
 
 import cv2
@@ -626,6 +627,7 @@ class XoutTracker(XoutNnResults):
     def __init__(self, det_nn, frames: StreamXout, tracklets: StreamXout):
         super().__init__(det_nn, frames, tracklets)
         self.buffer = []
+        self.spatial_buffer = []
 
     def on_callback(self, packet: Union[DetectionPacket, TrackerPacket]):
         try:
@@ -647,13 +649,16 @@ class XoutTracker(XoutNnResults):
         blacklist = set()
         threshold = self._visualizer.config.tracking.deletion_lost_threshold
         for i, tracklet in enumerate(packet.daiTracklets.tracklets):
-            if tracklet.status == dai.Tracklet.TrackingStatus.LOST:
-                self.lost_counter[tracklet.id] += 1
+            if tracklet.status == dai.Tracklet.TrackingStatus.NEW:
+                self.lost_counter[tracklet.id] = 0
             elif tracklet.status == dai.Tracklet.TrackingStatus.TRACKED:
                 self.lost_counter[tracklet.id] = 0
+            elif tracklet.status == dai.Tracklet.TrackingStatus.LOST and tracklet.id in self.lost_counter:
+                self.lost_counter[tracklet.id] += 1
 
             if tracklet.id in self.lost_counter and self.lost_counter[tracklet.id] >= threshold:
                 blacklist.add(tracklet.id)
+                self.lost_counter.pop(tracklet.id)
 
         filtered_tracklets = [tracklet for tracklet in packet.daiTracklets.tracklets if tracklet.id not in blacklist]
         self._visualizer.add_detections(filtered_tracklets,
@@ -661,17 +666,24 @@ class XoutTracker(XoutNnResults):
                                         self.labels,
                                         spatial_points=spatial_points)
 
-        # Add to local storage
+        # Update buffer
         self.buffer.append(packet)
         if self.buffer_size < len(self.buffer):
             self.buffer.pop(0)
 
+        # Update spatial buffer
+        if spatial_points is not None:
+            self.spatial_buffer.append(spatial_points)
+            if self.buffer_size < len(self.spatial_buffer):
+                self.spatial_buffer.pop(0)
+
+        # Add tracking lines
         self._visualizer.add_trail(
             tracklets=[t for p in self.buffer for t in p.daiTracklets.tracklets if t.id not in blacklist],
             label_map=self.labels
         )
 
-        # Add trail id
+        # Add tracking ids
         h, w = packet.frame.shape[:2]
         for tracklet in filtered_tracklets:
             det = tracklet.srcImgDetection
@@ -682,6 +694,49 @@ class XoutTracker(XoutNnResults):
                 bbox=bbox,
                 position=TextPosition.MID
             )
+
+        # Estimate speed
+        if spatial_points is not None and self._visualizer.config.tracking.speed:
+            spatial_coords = defaultdict(list)
+            t = defaultdict(list)
+            tracklets = defaultdict(list)
+            for buffered_packet in self.buffer:
+                for tracklet in buffered_packet.daiTracklets.tracklets:
+                    spatial_coords[tracklet.id].append(tracklet.spatialCoordinates)
+                    t[tracklet.id].append(buffered_packet.daiTracklets.getTimestamp())
+                    tracklets[tracklet.id].append(tracklet)
+
+            indices = spatial_coords.keys()
+            for idx in indices:
+                # Skip if there is only one point
+                if len(spatial_coords[idx]) < 2:
+                    continue
+
+                n = len(spatial_coords[idx])
+                speeds = []
+                for i in range(n - 1):
+                    x1, y1, z1 = spatial_coords[idx][i].x, spatial_coords[idx][i].y, spatial_coords[idx][i].z
+                    x2, y2, z2 = spatial_coords[idx][i + 1].x, spatial_coords[idx][i + 1].y, spatial_coords[idx][i + 1].z
+                    distance = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2) / 1000
+                    time = (t[idx][i + 1] - t[idx][i]).total_seconds()
+                    speed = distance / time
+                    speeds.append(speed)
+
+                speed = np.mean(speeds)
+                speed = f'{speed:.2f} m/s'
+                bbox = tracklets[idx][-1].srcImgDetection
+                bbox = (int(w * bbox.xmin), int(h * bbox.ymin), int(w * bbox.xmax), int(h * bbox.ymax))
+                self._visualizer.add_text(
+                    speed,
+                    bbox=bbox,
+                    position=TextPosition.TOP_RIGHT
+                )
+
+            print('a')
+
+
+
+
 
     def package(self, msgs: Dict):
         if self.queue.full():
